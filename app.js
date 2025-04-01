@@ -1,14 +1,23 @@
-import { Server } from 'socket.io'
-import { createServer } from 'http'
 import express from 'express'
+import { Server } from 'socket.io'
+import { createServer } from 'https'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 
-const app = express();
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-const httpServer = createServer(app)
-const io = new Server(httpServer, {
+const app = express()
+const httpsServer = createServer({
+  key: fs.readFileSync(path.join(__dirname, '../certificates/private.key')),
+  cert: fs.readFileSync(path.join(__dirname, '../certificates/certificate.crt'))
+}, app)
+
+const io = new Server(httpsServer, {
   cors: {
-    origin: "http://localhost:5173", // Your Vite dev server
-    methods: ["GET", "POST"]
+    origin: "https://localhost:5173", // Your Vite dev server
+    methods: ["GET", "POST"],
+    credentials: true
   }
 })
 
@@ -80,6 +89,6 @@ io.on('connection', (socket) => {
   })
 })
 
-httpServer.listen(3000, () => {
-  console.log('Server running on port 3000')
-})
+httpsServer.listen(3000, () => {
+    console.log('Secure server running on port 3000')
+  })
