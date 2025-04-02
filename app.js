@@ -58,6 +58,10 @@ io.on('connection', (socket) => {
       gameState.players[socket.id].room = roomId
       console.log(`Player ${playerName} (${socket.id}) created and joined new room ${roomId}.`)
     }
+
+    // Log the room the player is in after joining
+    const playerRoom = gameState.players[socket.id]?.room
+    console.log(`Player ${playerName} (${socket.id}) is now in room: ${playerRoom}`)
   })
 
   socket.on('shot', (data) => {
