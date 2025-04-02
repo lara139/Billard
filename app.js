@@ -89,10 +89,6 @@ io.on('connection', (socket) => {
   })
 })
 
-httpsServer.on('error', (err) => {
-    console.error('HTTPS Server Error:', err)
-  })
-
 httpsServer.listen(3000, () => {
     console.log('Secure server running on port 3000')
   })
