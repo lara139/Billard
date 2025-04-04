@@ -3,14 +3,22 @@ import { createServer } from 'http'
 import express from 'express'
 
 const app = express();
-
 const httpServer = createServer(app)
+
+// Configure Socket.IO with proper CORS for remote connections
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // Allow all origins for easier testing
-    methods: ["GET", "POST"]
-  }
-})
+    origin: "*", // In production, limit this to your domain
+    methods: ["GET", "POST"],
+    allowedHeaders: ["*"],
+    credentials: true
+  },
+  // Configure transport options
+  transports: ['polling', 'websocket'],
+  allowEIO3: true, // For compatibility
+  pingTimeout: 60000,
+  pingInterval: 25000
+});
 
 const gameState = {
   rooms: {},
