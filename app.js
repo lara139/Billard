@@ -7,7 +7,7 @@ const app = express();
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:5173", // Your Vite dev server
+    origin: "*", // Allow all origins for easier testing
     methods: ["GET", "POST"]
   }
 })
@@ -29,79 +29,175 @@ const BALL_TYPES = {
 const createRoomGameState = () => ({
   players: [],
   currentTurn: null,
-  scores: [0, 0], // [player1Score, player2Score]
+  scores: [0, 0], 
   ballsInHole: [],
-  playerTypes: [null, null], // [player1Type, player2Type] - 'solid' or 'striped'
-  gameWinner: null
+  playerTypes: [null, null],
+  gameWinner: null,
+  phase: 'lobby', // 'lobby', 'playing', 'gameOver'
 });
 
 io.on('connection', (socket) => {
   console.log('Player connected:', socket.id)
 
-  socket.on('joinGame', (playerName) => {
+  // Updated joinGame handler for lobby system
+  socket.on('joinGame', (data) => {
+    const { playerName, roomId } = data;
     console.log(`Player ${playerName} (${socket.id}) is attempting to join a game.`)
+    
+    // Initialize player in our state
     gameState.players[socket.id] = {
       id: socket.id,
       name: playerName,
-      room: null
+      room: null,
+      isReady: false
+    };
+    
+    let joinedRoom = false;
+    let finalRoomId = roomId;
+    
+    // If a specific room was requested via invite
+    if (roomId && gameState.rooms[roomId]) {
+      const room = gameState.rooms[roomId];
+      if (room.players.length < 2) {
+        room.players.push({
+          id: socket.id,
+          name: playerName,
+          isReady: false
+        });
+        socket.join(roomId);
+        gameState.players[socket.id].room = roomId;
+        joinedRoom = true;
+        console.log(`Player ${playerName} (${socket.id}) joined room ${roomId} via invite.`);
+      } else {
+        console.log(`Room ${roomId} is full, can't join via invite.`);
+        // Room is full, try to find or create another
+      }
     }
     
     // Find available room or create new one
-    let joinedRoom = false
-    for (const [roomId, room] of Object.entries(gameState.rooms)) {
-      if (room.players.length < 2) {
-        room.players.push(socket.id)
-        socket.join(roomId)
-        gameState.players[socket.id].room = roomId
-        joinedRoom = true
-        console.log(`Player ${playerName} (${socket.id}) joined room ${roomId}.`)
-
-        if (room.players.length === 2) {
-          console.log(`Room ${roomId} is now full. Starting game.`)
-          io.to(roomId).emit('gameStart', {
-            players: room.players.map(id => gameState.players[id])
-          })
-        }
-        break
-      }
-    }
-
     if (!joinedRoom) {
-      const roomId = `room_${Date.now()}`
-      gameState.rooms[roomId] = {
-        ...createRoomGameState(),
-        players: [socket.id],
-        currentTurn: socket.id
+      for (const [existingRoomId, room] of Object.entries(gameState.rooms)) {
+        if (room.phase === 'lobby' && room.players.length < 2) {
+          room.players.push({
+            id: socket.id,
+            name: playerName,
+            isReady: false
+          });
+          socket.join(existingRoomId);
+          gameState.players[socket.id].room = existingRoomId;
+          joinedRoom = true;
+          finalRoomId = existingRoomId;
+          console.log(`Player ${playerName} (${socket.id}) joined room ${existingRoomId}.`);
+          break;
+        }
       }
-      socket.join(roomId)
-      gameState.players[socket.id].room = roomId
-      console.log(`Player ${playerName} (${socket.id}) created and joined new room ${roomId}.`)
     }
 
-    // Log the room the player is in after joining
-    const playerRoom = gameState.players[socket.id]?.room
-    console.log(`Player ${playerName} (${socket.id}) is now in room: ${playerRoom}`)
-  })
+    // Create new room if needed
+    if (!joinedRoom) {
+      finalRoomId = `room_${Date.now()}`;
+      gameState.rooms[finalRoomId] = {
+        ...createRoomGameState(),
+        players: [{
+          id: socket.id,
+          name: playerName,
+          isReady: false
+        }],
+        currentTurn: socket.id
+      };
+      socket.join(finalRoomId);
+      gameState.players[socket.id].room = finalRoomId;
+      console.log(`Player ${playerName} (${socket.id}) created and joined new room ${finalRoomId}.`);
+    }
+
+    // Notify all clients in room about player changes
+    io.to(finalRoomId).emit('roomJoined', {
+      room: finalRoomId,
+      players: gameState.rooms[finalRoomId].players
+    });
+  });
+
+  // Handle player ready status
+  socket.on('playerReady', ({ isReady }) => {
+    const roomId = gameState.players[socket.id]?.room;
+    if (!roomId) return;
+    
+    const room = gameState.rooms[roomId];
+    const playerIndex = room.players.findIndex(p => p.id === socket.id);
+    
+    if (playerIndex !== -1) {
+      room.players[playerIndex].isReady = isReady;
+      
+      // Check if all players are ready and there are 2 players
+      const allReady = room.players.length === 2 && room.players.every(p => p.isReady);
+      
+      // Notify all clients about player status change
+      io.to(roomId).emit('playerReadyUpdate', {
+        players: room.players,
+        allReady
+      });
+      
+      // If all players ready, start game after a short delay
+      if (allReady) {
+        setTimeout(() => {
+          room.phase = 'playing';
+          io.to(roomId).emit('gameStart', { 
+            players: room.players
+          });
+        }, 3000);
+      }
+    }
+  });
+
+  // Request rematch after game over
+  socket.on('requestRematch', () => {
+    const roomId = gameState.players[socket.id]?.room;
+    if (!roomId) return;
+    
+    const room = gameState.rooms[roomId];
+    if (room.phase === 'gameOver') {
+      // Reset the room to lobby phase
+      room.phase = 'lobby';
+      room.scores = [0, 0];
+      room.ballsInHole = [];
+      room.playerTypes = [null, null];
+      room.gameWinner = null;
+      
+      // Reset player ready status
+      room.players.forEach(player => {
+        player.isReady = false;
+      });
+      
+      // Switch starting player for fairness
+      room.currentTurn = room.players.find(p => p.id !== room.currentTurn).id;
+      
+      // Notify clients of lobby state
+      io.to(roomId).emit('roomJoined', {
+        room: roomId,
+        players: room.players
+      });
+    }
+  });
 
   socket.on('shot', (data) => {
-    const room = gameState.players[socket.id]?.room
+    const room = gameState.players[socket.id]?.room;
     if (room) {
-      console.log(`Player ${socket.id} shot with force ${data.force} in room ${room}.`)
+      console.log(`Player ${socket.id} shot with force ${data.force} in room ${room}.`);
       socket.to(room).emit('playerShot', {
         playerId: socket.id,
         force: data.force
-      })
+      });
       
       // Update turn on the server side too
       const roomState = gameState.rooms[room];
-      const otherPlayerId = roomState.players.find(id => id !== socket.id);
+      const otherPlayerId = roomState.players.find(p => p.id !== socket.id)?.id;
       roomState.currentTurn = otherPlayerId;
     } else {
-      console.log(`Player ${socket.id} attempted to shoot but is not in a room.`)
+      console.log(`Player ${socket.id} attempted to shoot but is not in a room.`);
     }
-  })
+  });
 
-  // New event for ball position reporting
+  // Ball position reporting
   socket.on('ballPosition', (data) => {
     const { ballNumber, position } = data;
     const room = gameState.players[socket.id]?.room;
@@ -118,17 +214,17 @@ io.on('connection', (socket) => {
       roomState.ballsInHole.push(ballNumber);
       
       // Score logic
-      const playerIndex = roomState.players.findIndex(id => id === socket.id);
+      const playerIndex = roomState.players.findIndex(p => p.id === socket.id);
       let scoreUpdated = false;
       
       // Handle the first scoring ball - determines player types
       if (roomState.playerTypes[0] === null && ballNumber !== 0 && ballNumber !== 8) {
         if (BALL_TYPES.SOLID.includes(ballNumber)) {
           roomState.playerTypes[playerIndex] = 'solid';
-          roomState.playerTypes[1 - playerIndex] = 'striped'; // Other player gets opposite
+          roomState.playerTypes[1 - playerIndex] = 'striped';
         } else if (BALL_TYPES.STRIPED.includes(ballNumber)) {
           roomState.playerTypes[playerIndex] = 'striped';
-          roomState.playerTypes[1 - playerIndex] = 'solid'; // Other player gets opposite
+          roomState.playerTypes[1 - playerIndex] = 'solid';
         }
         
         // Update scores for this first ball
@@ -162,10 +258,12 @@ io.on('connection', (socket) => {
         if (allPlayerBallsPotted) {
           // Win!
           roomState.gameWinner = playerIndex;
+          roomState.phase = 'gameOver';
           console.log(`Player ${playerIndex} won by potting the 8 ball!`);
         } else {
           // Lose - potted 8 ball too early
-          roomState.gameWinner = 1 - playerIndex; 
+          roomState.gameWinner = 1 - playerIndex;
+          roomState.phase = 'gameOver';
           console.log(`Player ${playerIndex} lost by potting the 8 ball too early!`);
         }
         
@@ -175,10 +273,10 @@ io.on('connection', (socket) => {
         });
       }
       else if (ballNumber === 0) {
-        // Handle cue ball potted - NO penalty points now
+        // Handle cue ball potted - no penalty points
         console.log(`Cue ball potted by player ${playerIndex} in room ${room}`);
         
-        // Add cue ball to holes temporarily (without scoring points)
+        // Add cue ball to holes temporarily
         roomState.ballsInHole.push(ballNumber);
         
         // Broadcast the ball in hole to update client state
@@ -196,14 +294,12 @@ io.on('connection', (socket) => {
           io.to(room).emit('respawnCueBall');
           
           console.log("Respawned cue ball in room:", room);
-        }, 2000); // 2 second delay before respawning
+        }, 2000);
         
-        // Turn still goes to the opponent but no penalty point
-        // We'll update the game state but not increment scores
-        scoreUpdated = true; // Still need to broadcast updated state
+        scoreUpdated = true;
       }
       
-      // Broadcast updated game state to all players in the room
+      // Broadcast updated game state
       if (scoreUpdated) {
         io.to(room).emit('scoreUpdate', {
           scores: roomState.scores,
@@ -214,40 +310,48 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Add a throttle for physics snapshots to reduce network traffic
-  const lastPhysicsUpdate = {};
-
+  // Physics snapshot handling
   socket.on('physicsSnapshot', (snapshot) => {
     const room = gameState.players[socket.id]?.room;
     if (!room) return;
     
-    // Throttle snapshots from each client
+    // Throttle snapshots
     const now = Date.now();
-    if (!lastPhysicsUpdate[socket.id] || (now - lastPhysicsUpdate[socket.id] > 50)) {
-      lastPhysicsUpdate[socket.id] = now;
+    if (!socket.lastPhysicsUpdate || (now - socket.lastPhysicsUpdate > 50)) {
+      socket.lastPhysicsUpdate = now;
       
       // Broadcast physics snapshot to other clients in the room
       socket.to(room).emit('physicsSnapshot', snapshot);
     }
   });
 
+  // Handle disconnection
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`)
-    const room = gameState.players[socket.id]?.room
-    if (room) {
-      console.log(`Player ${socket.id} left room ${room}.`)
-      gameState.rooms[room].players = gameState.rooms[room].players.filter(id => id !== socket.id)
-      if (gameState.rooms[room].players.length === 0) {
-        console.log(`Room ${room} is now empty and has been deleted.`)
-        delete gameState.rooms[room]
+    const roomId = gameState.players[socket.id]?.room;
+    
+    if (roomId && gameState.rooms[roomId]) {
+      console.log(`Player ${socket.id} left room ${roomId}.`);
+      
+      // Remove player from room
+      const room = gameState.rooms[roomId];
+      room.players = room.players.filter(p => p.id !== socket.id);
+      
+      if (room.players.length === 0) {
+        console.log(`Room ${roomId} is now empty and has been deleted.`);
+        delete gameState.rooms[roomId];
       } else {
-        io.to(room).emit('playerLeft', socket.id)
+        // Notify remaining player
+        io.to(roomId).emit('playerLeft', {
+          players: room.players
+        });
       }
     }
-    delete gameState.players[socket.id]
-  })
-})
+    
+    delete gameState.players[socket.id];
+  });
+});
 
 httpServer.listen(3000, () => {
   console.log('Server running on port 3000')
-})
+});
