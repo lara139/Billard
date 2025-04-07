@@ -319,18 +319,91 @@ io.on('connection', (socket) => {
   });
 
   // Physics snapshot handling
-  socket.on('physicsSnapshot', (snapshot) => {
-    const room = gameState.players[socket.id]?.room;
-    if (!room) return;
+  socket.on('physicsSnapshot', (data) => {
+    const roomId = gameState.players[socket.id]?.room;
+    if (!roomId) return;
     
-    // Throttle snapshots
+    // Store timestamp to track latency
+    const serverTimestamp = Date.now();
+    const clientTimestamp = data.timestamp || serverTimestamp;
+    const ping = serverTimestamp - clientTimestamp;
+    
+    // Throttle snapshots based on ball speeds
+    // Get maximum ball speed from the snapshot
+    let maxSpeed = 0;
+    if (data.snapshot) {
+      Object.values(data.snapshot).forEach(ball => {
+        if (ball.speed && ball.speed > maxSpeed) {
+          maxSpeed = ball.speed;
+        }
+      });
+    }
+    
+    // Adaptive throttling based on ball speed
     const now = Date.now();
-    if (!socket.lastPhysicsUpdate || (now - socket.lastPhysicsUpdate > 50)) {
+    let minUpdateInterval = 100; // Default throttle time
+    
+    if (maxSpeed > 3) {
+      minUpdateInterval = 40; // Fast updates for fast balls
+    } else if (maxSpeed > 1) {
+      minUpdateInterval = 60; // Medium speed
+    }
+    
+    if (!socket.lastPhysicsUpdate || (now - socket.lastPhysicsUpdate > minUpdateInterval)) {
       socket.lastPhysicsUpdate = now;
       
+      // Add server timestamp and ping data to help with client-side prediction
+      const enrichedData = {
+        ...data,
+        serverTimestamp,
+        ping
+      };
+      
+      // Also store the latest snapshot on the server for new players joining
+      if (!gameState.rooms[roomId].latestPhysicsState) {
+        gameState.rooms[roomId].latestPhysicsState = {};
+      }
+      if (data.snapshot) {
+        gameState.rooms[roomId].latestPhysicsState = {
+          ...gameState.rooms[roomId].latestPhysicsState,
+          ...data.snapshot
+        };
+      }
+      
       // Broadcast physics snapshot to other clients in the room
-      socket.to(room).emit('physicsSnapshot', snapshot);
+      socket.to(roomId).emit('physicsSnapshot', enrichedData);
     }
+  });
+
+  // Request full state handler
+  socket.on('requestFullState', () => {
+    const roomId = gameState.players[socket.id]?.room;
+    if (!roomId) return;
+    
+    const room = gameState.rooms[roomId];
+    
+    // Find the current physics authority in the room
+    const authority = room.players.find(p => p.id === room.currentTurn);
+    
+    if (authority && authority.id !== socket.id) {
+      // Forward the request to the physics authority
+      io.to(authority.id).emit('requestFullState', { requesterId: socket.id });
+    }
+  });
+
+  // Handle response to full state request
+  socket.on('fullState', (fullState) => {
+    const roomId = gameState.players[socket.id]?.room;
+    if (!roomId) return;
+    
+    // Store the latest state on the server too
+    if (!gameState.rooms[roomId].latestPhysicsState) {
+      gameState.rooms[roomId].latestPhysicsState = {};
+    }
+    gameState.rooms[roomId].latestPhysicsState = fullState;
+    
+    // Send to everyone in the room (or to specific requester)
+    socket.to(roomId).emit('fullState', fullState);
   });
 
   // Handle disconnection
